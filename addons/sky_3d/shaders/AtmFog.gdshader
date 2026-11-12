@@ -138,9 +138,13 @@ void fragment() {
 	// Capped world position
 	//world_position = CAMERA_POSITION_WORLD + ray_distance * ray_direction;
 
-	float fog_factor = calc_fog_exp(ray_distance, fog_density);
+	// PanzerStrike: scale depth by the world-space horizontal fraction so vertical
+	// distance doesn't fog. ray_direction is a unit world direction: xz length = 0
+	// looking straight down, ~1 looking horizontally.
+	float horiz_depth = ray_distance * length(ray_direction.xz);
+	float fog_factor = calc_fog_exp(horiz_depth, fog_density);
 	fog_factor *= calc_fog_falloff(ray_direction.y, 0.0, fog_falloff);
-	fog_factor *= calc_fog_distance(ray_distance);
+	fog_factor *= calc_fog_distance(horiz_depth);
 
 	vec2 mu = vec2(
 		sun_enabled ? dot(sun_direction, ray_direction) : 0.0,
@@ -148,7 +152,7 @@ void fragment() {
 	);
 	float sr, sm;
 	calc_simple_optical_depth(ray_direction.y + atm_level_params.z, sr, sm, atm_level_params.xy);
-	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu, v_angle_mult.xyz, ray_distance);
+	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu, v_angle_mult.xyz, horiz_depth);
 
 	vec4 fog_color = vec4(scatter, fog_factor);
 	fog_color.a = clamp(fog_color.a, 0.0, 1.0);

@@ -72,6 +72,39 @@ var environment: Environment:
 		_update_ambient_color()
 
 
+# -- Ambient fill balance (PanzerStrike #594, the global warm cast) ----------
+#
+# Stock Sky3D derives the flat ambient term from the SUN light colour (see
+# _update_ambient_color below). At a golden-hour sun that colour is strongly
+# orange (measured live at (0.6012, 0.4732, 0.4034), R:B 1.49) and with
+# Environment.ambient_light_sky_contribution at 0.36 that means 64% of the
+# shadow fill is a second, dimmer sun. Real shadows are filled by the SKY, which
+# is blue. It was measured as the single largest contributor to the global warm
+# cast on the live map (ground R-B of +36..+58 on 16 of 18 bookmarks, where
+# neutral is 0).
+#
+# `ambient_sky_blend` pulls the ambient colour toward `ambient_sky_color`.
+# The mix is done at CONSTANT Rec.709 luma, so this is a HUE correction and can
+# never become an exposure change.
+#
+# 0.0 = stock Sky3D behaviour. The game sets this from
+# AtmosphereBuilder.setup_sky3d(), which is where it should be tuned.
+@export_range(0.0, 1.0, 0.01) var ambient_sky_blend: float = 0.0:
+	set(value):
+		ambient_sky_blend = value
+		_update_ambient_color()
+
+## Colour the ambient fill is pulled toward: sky bounce, i.e. what actually
+## lights a shadow outdoors. Luma is taken from the sun-derived colour, so only
+## the hue/chroma of this value matters.
+@export var ambient_sky_color: Color = Color(0.55, 0.68, 0.95):
+	set(value):
+		ambient_sky_color = value
+		_update_ambient_color()
+
+const _AMBIENT_LUMA := Vector3(0.2126, 0.7152, 0.0722)
+
+
 func _update_ambient_color() -> void:
 	if not environment or not _sun_light_node:
 		return
@@ -79,7 +112,29 @@ func _update_ambient_color() -> void:
 	var col: Color = _sun_light_node.light_color.lerp(atm_night_tint * _atm_night_intensity(), factor)
 	col.a = 1.
 	col.v = clamp(col.v, .35, 1.)
+	# Daylight gate. `factor` above is the night-tint ramp and is already ~0.40 at
+	# golden hour, so it is the wrong gate (it would halve the correction at
+	# exactly the hour the game ships at). Gate on the sun being meaningfully
+	# ABOVE the horizon instead: full correction while the sun is up, off once it
+	# has set and atm_night_tint owns the colour.
+	var daylight: float = clampf(_sun_transform.origin.y * 8.0 + 0.4, 0.0, 1.0)
+	var blend: float = ambient_sky_blend * daylight
+	if blend > 0.0:
+		col = _mix_at_constant_luma(col, ambient_sky_color, blend)
 	environment.ambient_light_color = col
+
+
+func _mix_at_constant_luma(from_col: Color, to_col: Color, t: float) -> Color:
+	## Blend hue only: renormalise the mix back to the source's Rec.709 luma.
+	var l0: float = from_col.r * _AMBIENT_LUMA.x + from_col.g * _AMBIENT_LUMA.y \
+			+ from_col.b * _AMBIENT_LUMA.z
+	var mixed: Color = from_col.lerp(to_col, t)
+	var l1: float = mixed.r * _AMBIENT_LUMA.x + mixed.g * _AMBIENT_LUMA.y \
+			+ mixed.b * _AMBIENT_LUMA.z
+	if l1 <= 0.0001:
+		return from_col
+	var k: float = l0 / l1
+	return Color(minf(mixed.r * k, 1.0), minf(mixed.g * k, 1.0), minf(mixed.b * k, 1.0), 1.0)
 
 
 func _ready() -> void:
@@ -523,6 +578,16 @@ func _update_moon_light_color() -> void:
 		_update_moon_light_energy()
 
 
+static var _moon_shadow_legacy: int = -1
+
+func _daylight_moon_shadow_legacy() -> bool:
+	## #603 escape hatch: --qa-perf-legacy restores the pre-fix behaviour (moon
+	## casts shadows in daylight) so the saving can be A/B'd from one build.
+	if _moon_shadow_legacy < 0:
+		_moon_shadow_legacy = 1 if "--qa-perf-legacy" in OS.get_cmdline_user_args() else 0
+	return _moon_shadow_legacy == 1
+
+
 func _update_moon_light_energy() -> void:
 	if not _moon_light_node or not moon_enabled:
 		return
@@ -534,8 +599,15 @@ func _update_moon_light_energy() -> void:
 	_moon_light_node.light_energy = l * SUN_MOON_CURVE.sample_baked(fade)
 	
 	# Cast shadows only when the user has asked for them and the light actually contributes.
+	# PERF (PanzerStrike #603): the moon is a SECOND shadow-casting DirectionalLight3D.
+	# While the sun is up its blue light contributes nothing a viewer can see, but its
+	# PSSM cascades still re-render every caster in range (about 20% of the in-frame
+	# primitive budget at a golden-hour town framing). Cast moon shadows only when the
+	# sun is actually down; --qa-perf-legacy restores the old behaviour for A/B.
+	var sun_is_up: bool = _sun_light_node != null and _sun_light_node.light_energy > 0.0
 	var cast_shadows: bool = moon_shadows_enabled \
-			and not is_equal_approx(_moon_light_node.light_energy, 0.0)
+			and not is_equal_approx(_moon_light_node.light_energy, 0.0) \
+			and (not sun_is_up or _daylight_moon_shadow_legacy())
 	if _moon_light_node.shadow_enabled != cast_shadows:
 		_moon_light_node.shadow_enabled = cast_shadows
 

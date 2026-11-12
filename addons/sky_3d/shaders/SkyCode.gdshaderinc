@@ -81,6 +81,11 @@ through various sources and calculations.
 
 group_uniforms clouds;
 uniform vec4 clouds_night_color: source_color = vec4(0.09, 0.094, 0.129, 1.0);
+// PanzerStrike: clouds receive skylight as well as direct sun. Weight 0 retains addon defaults.
+uniform vec3 cloud_sky_fill_color: source_color = vec3(0.62, 0.72, 0.90);
+uniform float cloud_sky_fill_weight: hint_range(0.0, 1.0) = 0.0;
+// PanzerStrike: QA-only visible backdrop experiment. Radiance/terrain lighting keep gain 3.
+uniform float qa_backdrop_cloud_fade_gain: hint_range(3.0, 12.0) = 3.0;
 
 group_uniforms cirrus_clouds;
 uniform bool cirrus_enabled = true;
@@ -353,7 +358,7 @@ vec4 render_cumulus_clouds(vec3 ro, vec3 rd, float am, vec3 sun_pos, vec3 moon_p
 // Cumulus only, evaluated in the quarter-resolution subpass — 1/16th the pixels for the same
 // raymarch. Returns straight (non-premultiplied) color with coverage in alpha, matching the
 // mix() the full-resolution pass performs.
-vec4 render_cumulus_layer(vec3 dir) {
+vec4 render_cumulus_layer(vec3 dir, bool radiance_pass) {
 	vec3 sun_pos = LIGHT0_DIRECTION;
 	vec3 moon_pos = LIGHT1_DIRECTION;
 	vec4 angle_mult;
@@ -364,18 +369,19 @@ vec4 render_cumulus_layer(vec3 dir) {
 
 	vec4 c = render_cumulus_clouds(vec3(0.0), dir, angle_mult.z, sun_pos, moon_pos);
 	c.a = clamp_to_unit(c.a);
-	vec3 cloud_tint = sun_light_color.rgb;
+	vec3 cloud_tint = mix(sun_light_color.rgb, cloud_sky_fill_color, cloud_sky_fill_weight);
 	cloud_tint = mix(cloud_tint, clouds_night_color.rgb, angle_mult.w);
 	c.rgb *= cloud_tint * cumulus_intensity;
 	// Matches the full-res horizon blend: world_pos.y after horizon_offset is applied.
-	c.a = mix(0.0, c.a, clamp_to_unit((dir.y - horizon_offset - 0.03) * 3.0));
+	// PanzerStrike: the visible backdrop may fade faster than the radiance cubemap.
+	c.a = mix(0.0, c.a, clamp_to_unit((dir.y - horizon_offset - 0.03) * (radiance_pass ? 3.0 : qa_backdrop_cloud_fade_gain)));
 	return c;
 }
 
 // Main
 //------------------------------------------------------------------------------
 
-vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, vec4 cumulus) {
+vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, vec4 cumulus, bool radiance_pass) {
 	vec3 col = vec3(0.0);
 
 	vec4 angle_mult;
@@ -392,6 +398,8 @@ vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, ve
 	world_pos.y -= horizon_offset;
 	float horizonBlend = clamp_to_unit((world_pos.y - 0.03) * 3.0);
 	float horizonBlendCumulus = clamp_to_unit((world_pos.y + 0.01) * 50.0);
+	float cloudHorizonBlend = clamp_to_unit((world_pos.y - 0.03) *
+		(radiance_pass ? 3.0 : qa_backdrop_cloud_fade_gain));
 
 	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu.xy, angle_mult.xyz);
 	col.rgb += scatter.rgb;
@@ -455,10 +463,10 @@ vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, ve
 	if (cirrus_enabled) {
 		vec4 cirrus_clouds = render_cirrus_clouds(clouds_pos);
 		cirrus_clouds.a = clamp_to_unit(cirrus_clouds.a);
-		vec3 cloud_tint = sun_light_color.rgb;
+		vec3 cloud_tint = mix(sun_light_color.rgb, cloud_sky_fill_color, cloud_sky_fill_weight);
 		cloud_tint = mix(cloud_tint, clouds_night_color.rgb, angle_mult.w);
 		cirrus_clouds.rgb *= cloud_tint * cirrus_intensity;
-		cirrus_clouds.a = mix(0.0, cirrus_clouds.a, horizonBlend);
+		cirrus_clouds.a = mix(0.0, cirrus_clouds.a, cloudHorizonBlend);
 		col.rgb = mix(col.rgb, cirrus_clouds.rgb + mix(vec3(0.0), scatter, cirrus_sky_tint_fade), cirrus_clouds.a);
 	}
 
@@ -582,7 +590,7 @@ void sky() {
 	// into it.
 	if (AT_QUARTER_RES_PASS) {
 		if (!AT_CUBEMAP_PASS && sky_enabled && cumulus_enabled && cumulus_quarter_res) {
-			vec4 c = render_cumulus_layer(EYEDIR);
+			vec4 c = render_cumulus_layer(EYEDIR, AT_CUBEMAP_PASS);
 			col = c.rgb;
 			alpha = c.a;
 		} else {
@@ -597,9 +605,9 @@ void sky() {
 			if (clouds_in_reflections) {
 				vec4 cumulus = vec4(0.0);
 				if (cumulus_enabled) {
-					cumulus = render_cumulus_layer(EYEDIR);
+					cumulus = render_cumulus_layer(EYEDIR, AT_CUBEMAP_PASS);
 				}
-				col = render_sky(EYEDIR, EYEDIR, sun_pos, moon_pos, cumulus);
+				col = render_sky(EYEDIR, EYEDIR, sun_pos, moon_pos, cumulus, AT_CUBEMAP_PASS);
 			} else {
 				col = render_atmosphere(EYEDIR, sun_pos, moon_pos);
 			}
@@ -614,19 +622,19 @@ void sky() {
 				if (cumulus_quarter_res) {
 					cumulus = QUARTER_RES_COLOR;
 				} else {
-					cumulus = render_cumulus_layer(EYEDIR);
+					cumulus = render_cumulus_layer(EYEDIR, AT_CUBEMAP_PASS);
 				}
 #else
 				// This variant has no quarter-res read — GLES3's sky template cannot
 				// compile one (its sampler block references Vulkan-only sampler macros
 				// GLES3 never defines). March at full resolution, exactly as before the
 				// subpass split.
-				cumulus = render_cumulus_layer(EYEDIR);
+				cumulus = render_cumulus_layer(EYEDIR, AT_CUBEMAP_PASS);
 #endif
 			}
 			// EYEDIR is passed twice: the original shader tracked world position and cloud
 			// position separately, and they have been identical since the port to a sky shader.
-			col = render_sky(EYEDIR, EYEDIR, sun_pos, moon_pos, cumulus);
+			col = render_sky(EYEDIR, EYEDIR, sun_pos, moon_pos, cumulus, AT_CUBEMAP_PASS);
 		}
 
 		// Draw overlay grids
