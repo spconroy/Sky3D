@@ -74,6 +74,11 @@ through various sources and calculations.
 
 group_uniforms clouds;
 uniform vec4 clouds_night_color: source_color = vec4(0.09, 0.094, 0.129, 1.0);
+// Clouds receive skylight as well as direct sun. Zero retains addon defaults.
+uniform vec3 cloud_sky_fill_color: source_color = vec3(0.62, 0.72, 0.90);
+uniform float cloud_sky_fill_weight: hint_range(0.0, 1.0) = 0.0;
+// QA-only visible backdrop experiment. Radiance/terrain lighting keep gain 3.
+uniform float qa_backdrop_cloud_fade_gain: hint_range(3.0, 12.0) = 3.0;
 
 group_uniforms cirrus_clouds;
 uniform bool cirrus_visible = true;
@@ -327,7 +332,7 @@ vec4 render_cumulus_clouds(vec3 ro, vec3 rd, float am, vec3 sun_pos, vec3 moon_p
 // Main
 //------------------------------------------------------------------------------
 
-vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, float p_time) {
+vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, float p_time, bool radiance_pass) {
 	vec3 col = vec3(0.0);
 
 	vec4 angle_mult;
@@ -344,6 +349,8 @@ vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, fl
 	world_pos.y -= horizon_offset;
 	float horizonBlend = clamp_to_unit((world_pos.y - 0.03) * 3.0);
 	float horizonBlendCumulus = clamp_to_unit((world_pos.y + 0.01) * 50.0);
+	float cloudHorizonBlend = clamp_to_unit((world_pos.y - 0.03) *
+		(radiance_pass ? 3.0 : qa_backdrop_cloud_fade_gain));
 
 	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu.xy, angle_mult.xyz);
 	col.rgb += scatter.rgb;
@@ -401,20 +408,20 @@ vec3 render_sky(vec3 world_pos, vec3 clouds_pos, vec3 sun_pos, vec3 moon_pos, fl
 	if (cirrus_visible) {
 		vec4 cirrus_clouds = render_cirrus_clouds(clouds_pos);
 		cirrus_clouds.a = clamp_to_unit(cirrus_clouds.a);
-		vec3 cloud_tint = sun_light_color.rgb;
+		vec3 cloud_tint = mix(sun_light_color.rgb, cloud_sky_fill_color, cloud_sky_fill_weight);
 		cloud_tint = mix(cloud_tint, clouds_night_color.rgb, angle_mult.w);
 		cirrus_clouds.rgb *= cloud_tint * cirrus_intensity;
-		cirrus_clouds.a = mix(0.0, cirrus_clouds.a, horizonBlend);
+		cirrus_clouds.a = mix(0.0, cirrus_clouds.a, cloudHorizonBlend);
 		col.rgb = mix(col.rgb, cirrus_clouds.rgb + mix(vec3(0.0), scatter, cirrus_sky_tint_fade), cirrus_clouds.a);
 	}
 
 	if (cumulus_visible) {
 		vec4 cumulus_clouds = render_cumulus_clouds(vec3(0.0), clouds_pos, angle_mult.z, sun_pos, moon_pos);
 		cumulus_clouds.a = clamp_to_unit(cumulus_clouds.a);
-		vec3 cloud_tint = sun_light_color.rgb;
+		vec3 cloud_tint = mix(sun_light_color.rgb, cloud_sky_fill_color, cloud_sky_fill_weight);
 		cloud_tint = mix(cloud_tint, clouds_night_color.rgb, angle_mult.w);
 		cumulus_clouds.rgb *= cloud_tint * cumulus_intensity;
-		cumulus_clouds.a = mix(0.0, cumulus_clouds.a, horizonBlend);
+		cumulus_clouds.a = mix(0.0, cumulus_clouds.a, cloudHorizonBlend);
 		col.rgb = mix(col.rgb, cumulus_clouds.rgb + mix(vec3(0.0), scatter, cumulus_sky_tint_fade), cumulus_clouds.a);
 	}
 
@@ -495,7 +502,7 @@ void sky() {
 	vec3 moon_pos = LIGHT1_DIRECTION; // Redefined from now-deprecated _moon_direction.
 
 	if (sky_visible) {
-		col = render_sky(world_pos, clouds_pos, sun_pos, moon_pos, current_time);
+		col = render_sky(world_pos, clouds_pos, sun_pos, moon_pos, current_time, AT_CUBEMAP_PASS);
 	}
 
 	// Draw overlay grids

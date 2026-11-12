@@ -132,14 +132,18 @@ void fragment() {
 	worldPos = normalize(worldPos);
 
 	float linear_depth = -view.z;
-	float fog_factor = calc_fog_exp(linear_depth, fog_density);
+	// Scale depth by world-space horizontal fraction so vertical distance doesn't fog
+	// worldPos is normalized world direction: xz length = 0 looking down, ~1 looking horizontal
+	float horiz_factor = length(worldPos.xz);
+	float horiz_depth = linear_depth * horiz_factor;
+	float fog_factor = calc_fog_exp(horiz_depth, fog_density);
 	fog_factor *= calc_fog_falloff(worldPos.y, 0.0, fog_falloff);
-	fog_factor *= calc_fog_distance(linear_depth);
+	fog_factor *= calc_fog_distance(horiz_depth);
 
 	vec2 mu = vec2(dot(sun_direction, worldPos), dot(moon_direction, worldPos));
 	float sr, sm;
 	calc_simple_optical_depth(worldPos.y + atm_level_params.z, sr, sm, atm_level_params.xy);
-	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu.xy, angle_mult.xyz, linear_depth);
+	vec3 scatter = calc_atmospheric_scatter(sr, sm, mu.xy, angle_mult.xyz, horiz_depth);
 
 	vec3 tint =  scatter;
 	vec4 fog_color = vec4(tint.rgb, fog_factor);
